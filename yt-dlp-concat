@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+
+set -o errexit
+set -o pipefail
+
+show_help() {
+    echo "USAGE: $0 [OPTIONS] URL [-- yt-dlp-options]"
+    echo ""
+    echo "  Downloads a playlist with yt-dlp and concatenates the files using the concat demuxer."
+    echo ""
+    echo "OPTIONS:"
+    echo "-c, --container <CONTAINER>  Target container format (e.g. mp4, mkv)."
+    echo "-d, --dir <DIRECTORY>        Output directory. Default is the current working directory."
+    echo "-h, --help                   Show this help message."
+    echo "-o, --output <FILE>          Output file relative to <DIRECTORY>."
+}
+
+error() {
+    printf "ERROR: %s\n" "$1" >&2
+    exit 1
+}
+
+missing_argument() {
+    error "\"$1/$2\" requires a non-empty option argument."
+}
+
+if [ $# == 0 ]; then
+    show_help
+    exit 1
+fi
+
+container=""
+dir="."
+output=""
+url=""
+
+while [ $# -gt 0 ]; do
+    case $1 in
+        -c|--container)
+            if [ -n "$2" ]; then
+                container=$2
+                shift
+                shift
+            else
+                missing_argument "-c" "--container"
+            fi
+            ;;    
+        -d|--dir)
+            if [ -n "$2" ]; then
+                dir=$2
+                shift
+                shift
+            else
+                missing_argument "-d" "--dir"
+            fi
+            ;;
+        -h|--help)
+            show_help
+            exit 0
+            ;;
+        -o|--output)       
+            if  [ -n "$2" ]; then
+                output=$2
+                shift
+                shift
+            else
+                missing_argument "-o" "--output"
+            fi
+            ;;
+        --)
+            shift
+            break
+            ;;
+        -?*)
+            error "Unknown option $1."
+            ;;
+        *)  
+            if [ -n "$url" ]; then
+                error "Only one url allowed."
+            else
+                url="$1"
+                shift
+            fi            
+            ;;
+    esac
+done
+
+if [ -z "$url" ]; then
+    error "No url provided." 
+fi
+
+tmp_dir=$(mktemp --directory)
+trap 'rm --recursive --force $tmp_dir' SIGINT SIGTERM ERR EXIT
+
+concat_file="${tmp_dir}/concat.txt"
+postprocess="echo \"file '{}'\" >> ${concat_file}"
+yt-dlp "$@" --exec "${postprocess}" --output "${tmp_dir}/%(playlist_index)s.%(ext)s" "$url"
+
+if [ -n "$output" ]; then
+    target="${dir}/${output}"
+else
+    html_title=$(curl --silent --no-buffer "$url" | tr --delete "\n\r"  | sed --silent 's/.*<title>\(.*\)<\/title>.*/\1/p' | xargs)
+    filename=$(echo "$html_title" | sed 's/\///g;s/ /_/g' | awk '{if (length($0) > 25) {print substr($0, 0, 25)"…"} else print $0}')
+    id=$(echo -n "$url" | sha1sum | head -c 8)
+    if [ -n "$container" ]; then
+        ext="$container"
+    else
+        ext=$(awk 'NR == 1 { gsub(/\47/, "", $2); print $2}' "$concat_file" | sed 's/.*\.//')
+    fi
+    target="${dir}/${filename}_${id}.${ext}"
+fi
+
+ffmpeg -f concat -safe -0 -i "$concat_file" -codec copy "$target"
